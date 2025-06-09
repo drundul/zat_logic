@@ -1,130 +1,103 @@
-
 import os
 import threading
-import logging
-import json
-import openai
-import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+import openai
+import json
 
-# Настройки
-openai.api_key = os.getenv("OPENAI_API_KEY")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-PORT = int(os.environ.get("PORT", 10000))
-
-# Заглушка для Render
+# Заглушка для Render (порт 10000)
 def fake_server():
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b'Bot is running.')
-    server = HTTPServer(('0.0.0.0', PORT), Handler)
+    port = int(os.environ.get('PORT', 10000))
+    server = HTTPServer(('0.0.0.0', port), Handler)
     server.serve_forever()
+
 threading.Thread(target=fake_server).start()
 
-logging.basicConfig(level=logging.INFO)
+# OpenAI ключ из переменной окружения
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# SQLite-база
-conn = sqlite3.connect("data.db", check_same_thread=False)
-c = conn.cursor()
-c.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, name TEXT)")
-c.execute("CREATE TABLE IF NOT EXISTS questions (user_id INTEGER, question TEXT)")
-conn.commit()
+# Telegram токен из переменной окружения
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+bot = Bot(token=TELEGRAM_TOKEN)
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# Загрузка архива канала
-channel_messages = []
-if os.path.exists("channel_archive.json"):
+# Загрузка архива сообщений канала
+try:
     with open("channel_archive.json", "r", encoding="utf-8") as f:
-        channel_messages = json.load(f)
+        archive_data = json.load(f)
+except:
+    archive_data = []
 
-# Память сообщений
-user_histories = {}
-user_states = {}
+# Память
+chat_histories = {}
+user_questions = {}
+unique_users = set()
 
-# Команды
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    name = update.effective_user.full_name
-    c.execute("INSERT OR IGNORE INTO users (user_id, name) VALUES (?, ?)", (user_id, name))
-    conn.commit()
-    await update.message.reply_text(
-        "✨ Привет, я Татьянин помощник. Хочешь вдохновение, медитацию или поговорим о чём-то важном?",
-        reply_markup=ReplyKeyboardMarkup([['Медитация'], ['Хочу поделиться'], ['Просто побудь рядом']], resize_keyboard=True)
-    )
+    await update.message.reply_text("✨ Привет, я Татьянин помощник. Готова поддержать тебя, дать практику или вдохновение. Спроси меня о чём-то важном 💫")
 
-# Диалоговая логика
+def get_matched_archive_response(user_message):
+    if not archive_data:
+        return ""
+    for item in archive_data:
+        text = item.get("text", "").lower()
+        if any(word in user_message.lower() for word in ["страх", "тревога", "деньги", "желание", "контроль"]):
+            if text and len(text) > 50:
+                return text
+    return ""
+
 async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_message = update.message.text.lower()
-    c.execute("INSERT INTO questions (user_id, question) VALUES (?, ?)", (user_id, user_message))
-    conn.commit()
+    user_id = update.message.from_user.id
+    user_text = update.message.text
 
-    # Обновляем память
-    history = user_histories.get(user_id, [])
-    history.append({"role": "user", "content": user_message})
+    unique_users.add(user_id)
+    user_questions.setdefault(user_id, []).append(user_text)
+
+    # Обработка памяти сообщений
+    history = chat_histories.get(user_id, [])
+    history.append({"role": "user", "content": user_text})
     if len(history) > 5:
         history = history[-5:]
-    user_histories[user_id] = history
+    chat_histories[user_id] = history
 
-    # Обработка триггеров
-    if "тревога" in user_message or "боюсь" in user_message:
-        user_states[user_id] = "anxiety"
-        await update.message.reply_text(
-            "Я рядом. Эта тревога больше про финансы, отношения или внутренний контроль?"
+    # System prompt в стиле Татьяны
+    system_prompt = (
+        "Ты — проводник Татьяна, мягкая, теплая, глубоко принимающая. "
+        "Ты отвечаешь женщине 35–54 лет, которая тревожится, ищет путь к себе, хочет внутреннего покоя и достатка. "
+        "Говори образно, с теплом, как душевная подруга, предлагай практики, задавай уточняющие вопросы, веди от боли к доверию."
+    )
+
+    messages = [{"role": "system", "content": system_prompt}] + history
+
+    # Получение ответа от OpenAI
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=messages
         )
-        return
-    elif user_states.get(user_id) == "anxiety":
-        user_states[user_id] = "offer_practice"
-        await update.message.reply_text("Давай сделаем мягкое дыхание. Хочешь?")
-        return
-    elif user_states.get(user_id) == "offer_practice" and "да" in user_message:
-        await update.message.reply_text("🌬 Закрой глаза и просто подыши. Глубокий вдох… и мягкий выдох… Я здесь.")
-        user_states[user_id] = "invite"
-        return
-    elif user_states.get(user_id) == "invite":
-        await update.message.reply_text("Хочешь больше таких практик? Приглашаю в клуб, где мы вместе дышим, чувствуем и растём 🌿")
-        user_states[user_id] = None
-        return
+        reply_text = response.choices[0].message["content"]
+    except Exception as e:
+        reply_text = "⚠️ Возникла ошибка при обращении к OpenAI: " + str(e)
 
-    # Проверка архива канала
-    matched = next((m["text"] for m in channel_messages if isinstance(m, dict) and "text" in m and m["text"] and m["text"] in user_message), None)
+    # Добавление ответа в историю
+    history.append({"role": "assistant", "content": reply_text})
+    chat_histories[user_id] = history
 
+    # Ответ из архива
+    matched = get_matched_archive_response(user_text)
     if matched:
-        reply_text = f"💬 Это из канала Татьяны:\n\n{matched}"
+        reply_text += f"\n\n💬 Это из канала Татьяны:\n\n{matched}"
 
-{matched}"
-    else:
-        messages = [{
-            "role": "system",
-            "content": (
-                "Ты — тёплый и глубоко чувствующий помощник в стиле Татьяны Зарецкой. Ты слышишь, чувствуешь, направляешь. "
-                "Твоя задача — помочь человеку вернуться в состояние опоры, ресурса, мягкости и понимания. Говоришь метафорами, мягко, с любовью."
-            )
-        }] + history
-        try:
-            response = openai.ChatCompletion.create(
-                model="gpt-4o",
-                temperature=0.9,
-                presence_penalty=0.5,
-                frequency_penalty=0.4,
-                messages=messages
-            )
-            reply_text = response.choices[0].message["content"]
-        except Exception as e:
-            reply_text = f"Произошла ошибка: {e}"
-
-    user_histories[user_id].append({"role": "assistant", "content": reply_text})
     await update.message.reply_text(reply_text)
 
-# Запуск
-def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, respond))
-    app.run_polling()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, respond))
 
 if __name__ == "__main__":
-    main()
+    application.run_polling()
