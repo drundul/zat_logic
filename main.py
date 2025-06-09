@@ -93,7 +93,7 @@ async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE):
     matched = next((m["text"] for m in channel_messages if isinstance(m, dict) and "text" in m and m["text"] and m["text"] in user_message), None)
 
     if matched:
-        reply_text = f"💬 Это из канала Татьяны:
+        reply_text = f"💬 Это из канала Татьяны:\n\n{matched}"
 
 {matched}"
     else:
