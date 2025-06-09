@@ -3,7 +3,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-import openai
+from openai import OpenAI
 import json
 
 # Заглушка для Render (порт 10000)
@@ -19,8 +19,8 @@ def fake_server():
 
 threading.Thread(target=fake_server).start()
 
-# OpenAI ключ из переменной окружения
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# OpenAI клиент
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Telegram токен из переменной окружения
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -77,11 +77,11 @@ async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Получение ответа от OpenAI
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-4o",
             messages=messages
         )
-        reply_text = response.choices[0].message["content"]
+        reply_text = response.choices[0].message.content
     except Exception as e:
         reply_text = "⚠️ Возникла ошибка при обращении к OpenAI: " + str(e)
 
