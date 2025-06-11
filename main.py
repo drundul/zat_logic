@@ -1,103 +1,52 @@
 import os
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-from openai import OpenAI
-import json
+import openai
+import telebot
+from dotenv import load_dotenv
 
-# Заглушка для Render (порт 10000)
-def fake_server():
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b'Bot is running.')
-    port = int(os.environ.get('PORT', 10000))
-    server = HTTPServer(('0.0.0.0', port), Handler)
-    server.serve_forever()
+load_dotenv()
 
-threading.Thread(target=fake_server).start()
+bot = telebot.TeleBot(os.getenv("TELEGRAM_BOT_TOKEN"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# OpenAI клиент
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+ASSISTANT_ID = os.getenv("ASSISTANT_ID")
 
-# Telegram токен из переменной окружения
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-bot = Bot(token=TELEGRAM_TOKEN)
-application = Application.builder().token(TELEGRAM_TOKEN).build()
+# Храним сессии с пользователями
+user_threads = {}
 
-# Загрузка архива сообщений канала
-try:
-    with open("channel_archive.json", "r", encoding="utf-8") as f:
-        archive_data = json.load(f)
-except:
-    archive_data = []
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    user_id = str(message.chat.id)
 
-# Память
-chat_histories = {}
-user_questions = {}
-unique_users = set()
+    # Создаем новую ветку для каждого пользователя, если нет
+    if user_id not in user_threads:
+        thread = openai.beta.threads.create()
+        user_threads[user_id] = thread.id
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✨ Привет, я Татьянин помощник. Готова поддержать тебя, дать практику или вдохновение. Спроси меня о чём-то важном 💫")
-
-def get_matched_archive_response(user_message):
-    if not archive_data:
-        return ""
-    for item in archive_data:
-        text = item.get("text", "").lower()
-        if any(word in user_message.lower() for word in ["страх", "тревога", "деньги", "желание", "контроль"]):
-            if text and len(text) > 50:
-                return text
-    return ""
-
-async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    user_text = update.message.text
-
-    unique_users.add(user_id)
-    user_questions.setdefault(user_id, []).append(user_text)
-
-    # Обработка памяти сообщений
-    history = chat_histories.get(user_id, [])
-    history.append({"role": "user", "content": user_text})
-    if len(history) > 5:
-        history = history[-5:]
-    chat_histories[user_id] = history
-
-    # System prompt в стиле Татьяны
-    system_prompt = (
-        "Ты — проводник Татьяна, мягкая, теплая, глубоко принимающая. "
-        "Ты отвечаешь женщине 35–54 лет, которая тревожится, ищет путь к себе, хочет внутреннего покоя и достатка. "
-        "Говори образно, с теплом, как душевная подруга, предлагай практики, задавай уточняющие вопросы, веди от боли к доверию."
+    # Отправляем сообщение в ветку
+    openai.beta.threads.messages.create(
+        thread_id=user_threads[user_id],
+        role="user",
+        content=message.text,
     )
 
-    messages = [{"role": "system", "content": system_prompt}] + history
+    # Запускаем ассистента
+    run = openai.beta.threads.runs.create(
+        thread_id=user_threads[user_id],
+        assistant_id=ASSISTANT_ID,
+    )
 
-    # Получение ответа от OpenAI
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages
-        )
-        reply_text = response.choices[0].message.content
-    except Exception as e:
-        reply_text = "⚠️ Возникла ошибка при обращении к OpenAI: " + str(e)
+    # Ждем завершения
+    while True:
+        status = openai.beta.threads.runs.retrieve(thread_id=user_threads[user_id], run_id=run.id)
+        if status.status == "completed":
+            break
 
-    # Добавление ответа в историю
-    history.append({"role": "assistant", "content": reply_text})
-    chat_histories[user_id] = history
+    # Получаем ответ
+    messages = openai.beta.threads.messages.list(thread_id=user_threads[user_id])
+    reply = messages.data[0].content[0].text.value
 
-    # Ответ из архива
-    matched = get_matched_archive_response(user_text)
-    if matched:
-        reply_text += f"\n\n💬 Это из канала Татьяны:\n\n{matched}"
-
-    await update.message.reply_text(reply_text)
-
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, respond))
+    # Отправляем ответ в Telegram
+    bot.send_message(chat_id=message.chat.id, text=reply)
 
 if __name__ == "__main__":
-    application.run_polling()
+    bot.polling()
